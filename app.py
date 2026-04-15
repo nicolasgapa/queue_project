@@ -7,7 +7,7 @@ app = Flask(__name__)
 # Simulation Parameters
 params = {
     "lambda": 2.0,  # Arrival rate
-    "mu": 20,      # Service rate
+    "mu": 0.5,      # Service rate
     "alpha": 0.001    # Retrial rate (per person in orbit)
 }
 
