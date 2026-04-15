@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Queue Flow Sim - Event History</title>
+    <style>
+        body { 
+            background: #1a1a1a; color: white; text-align: center; 
+            font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; height: 100vh; 
+        }
+        /* Layout */
+        #main-container { flex: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; border-right: 2px solid #333; }
+        #history-sidebar { flex: 1; background: #252525; display: flex; flex-direction: column; overflow: hidden; }
+        
+        /* UI Elements */
+        canvas { background: #222; border-radius: 12px; border: 1px solid #444; }
+        .stats { margin-top: 15px; font-size: 1.2rem; }
+        
+        /* History Log */
+        #log-header { padding: 15px; background: #333; font-weight: bold; border-bottom: 1px solid #444; }
+        #event-log { flex: 1; overflow-y: auto; padding: 10px; list-style: none; margin: 0; text-align: left; font-family: monospace; }
+        .log-entry { margin-bottom: 5px; padding: 5px; border-radius: 4px; font-size: 0.85rem; }
+        .log-retry { color: #ffce56; border-left: 3px solid #ffce56; background: rgba(255, 206, 86, 0.1); }
+        .log-arrival { color: #4bc0c0; }
+        .log-completion { color: #ff6384; }
+    </style>
+</head>
+<body>
+
+    <div id="main-container">
+        <h2>Retrial Queue Flow</h2>
+        <canvas id="simCanvas" width="700" height="450"></canvas>
+        <div class="stats">
+            Orbiting: <span id="count" style="color: #ffce56;">0</span> | 
+            Server: <span id="status">Idle</span> |
+            Sim Time: <span id="sim-time" style="color: #aaa;">0.00</span>
+        </div>
+    </div>
+
+    <div id="history-sidebar">
+        <div id="log-header">Live Event History</div>
+        <ul id="event-log">
+            </ul>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const eventLog = document.getElementById('event-log');
+
+        let particles = [];
+        let lastState = { orbit_count: 0, server_busy: false, time: 0 };
+
+        class Particle {
+            constructor(type) {
+                this.type = type;
+                this.radius = 8;
+                this.progress = 0;
+                this.speed = 0.03;
+                this.angle = Math.random() * Math.PI * 2;
+                this.x = (type === 'entering') ? 0 : centerX;
+                this.y = centerY;
+            }
+
+            update() {
+                if (this.type === 'entering') {
+                    this.progress += this.speed;
+                    this.x = this.progress * centerX;
+                    if (this.progress >= 1) {
+                        const currentOrbiters = particles.filter(p => p.type === 'orbiting').length;
+                        if (lastState.orbit_count > currentOrbiters) {
+                            this.type = 'orbiting';
+                            return true;
+                        }
+                        return false; 
+                    }
+                } 
+                else if (this.type === 'leaving') {
+                    this.progress += this.speed;
+                    this.x = centerX + (this.progress * centerX);
+                    if (this.progress >= 1) return false;
+                }
+                return true;
+            }
+
+            draw() {
+                ctx.beginPath();
+                let drawX = this.x, drawY = this.y;
+                if (this.type === 'orbiting') {
+                    this.angle += 0.03;
+                    drawX = centerX + 110 * Math.cos(this.angle);
+                    drawY = centerY + 110 * Math.sin(this.angle);
+                }
+                ctx.arc(drawX, drawY, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.type === 'leaving' ? '#555' : '#ffce56';
+                ctx.fill();
+            }
+        }
+
+        function addLogEntry(type, time, message) {
+            const li = document.createElement('li');
+            li.className = `log-entry log-${type.toLowerCase()}`;
+            li.innerHTML = `[T:${time.toFixed(2)}] <b>${type}</b>: ${message}`;
+            eventLog.prepend(li); // Newest on top
+            if (eventLog.children.length > 50) eventLog.lastChild.remove();
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // Server Circle
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 40, 0, Math.PI * 2);
+            ctx.fillStyle = lastState.server_busy ? '#ff6384' : '#4bc0c0';
+            ctx.fill();
+            ctx.strokeStyle = "white"; ctx.stroke();
+            
+            particles = particles.filter(p => p.update());
+            particles.forEach(p => p.draw());
+            requestAnimationFrame(draw);
+        }
+
+        function updateData() {
+            fetch('/data')
+                .then(res => res.json())
+                .then(data => {
+                    const prevOrbit = lastState.orbit_count;
+                    const prevBusy = lastState.server_busy;
+                    
+                    // Log events based on the type returned from Python
+                    if (data.event === "RETRY") {
+                        const success = (!prevBusy && data.server_busy);
+                        addLogEntry("RETRY", data.time, success ? "Success! Entered Server" : "Failed - Server Busy");
+                    } else if (data.event === "ARRIVAL") {
+                        addLogEntry("ARRIVAL", data.time, data.orbit_count > prevOrbit ? "Server busy -> Orbit" : "Direct to Server");
+                    } else if (data.event === "COMPLETION") {
+                        addLogEntry("COMPLETION", data.time, "Request finished & left");
+                    }
+
+                    // Visual triggers
+                    if (data.orbit_count > prevOrbit || (data.server_busy && !prevBusy && data.event === "ARRIVAL")) {
+                        particles.push(new Particle('entering'));
+                    }
+                    if (!data.server_busy && prevBusy) {
+                        particles.push(new Particle('leaving'));
+                    }
+
+                    // Orbit sync (handles retrial movement)
+                    let currentOrbiters = particles.filter(p => p.type === 'orbiting');
+                    if (data.orbit_count < currentOrbiters.length) {
+                        const idx = particles.findIndex(p => p.type === 'orbiting');
+                        if (idx > -1) particles.splice(idx, 1);
+                    }
+
+                    lastState = data;
+                    document.getElementById('count').innerText = data.orbit_count;
+                    document.getElementById('sim-time').innerText = data.time.toFixed(2);
+                    document.getElementById('status').innerText = data.server_busy ? "BUSY" : "FREE";
+                    document.getElementById('status').style.color = data.server_busy ? "#ff6384" : "#4bc0c0";
+                });
+        }
+
+        draw();
+        setInterval(updateData, 600); // Slightly faster to keep history lively
+    </script>
+</body>
+</html>
